@@ -1,12 +1,78 @@
 use log;
 use hidapi::HidApi;
 use anyhow::{anyhow, Result};
-use windows::Win32::Media::Audio::IMMDevice;
+use std::time::{Duration, Instant};
 use windows::{Win32::{Media::Audio::{Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender}, System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize}}, core::Interface};
 
 
+// PowerMate VID and PID
 const VID: u16 = 0x077d;
 const PID: u16 = 0x0410;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PowerMateEvent {
+    Press,
+    Release,
+    Turn(i8),
+    TurnWhilePressed(i8),
+}
+
+pub struct PowerMate {
+    last_pressed: bool,
+    last_event_time: Instant,
+    debounce: Duration,
+}
+
+impl PowerMate {
+    pub fn new() -> Self {
+        Self {
+            last_pressed: false,
+            last_event_time: Instant::now(),
+            debounce: Duration::from_millis(50),
+        }
+    }
+
+    pub fn handle_report(&mut self, buf: [u8; 6]) -> Vec<PowerMateEvent> {
+        let mut events = Vec::new();
+
+        let pressed = buf[0] != 0;
+        let delta = buf[1] as i8;
+        let now = Instant::now();
+
+        // --- Handle button transitions (deduplicated) ---
+        if pressed != self.last_pressed {
+            if pressed {
+                events.push(PowerMateEvent::Press);
+            } else {
+                events.push(PowerMateEvent::Release);
+            }
+            self.last_pressed = pressed;
+            self.last_event_time = now;
+        }
+
+        // --- Handle rotation ---
+        if delta != 0 {
+            // If we somehow missed a press but we're rotating while "pressed",
+            // optionally infer it (helps with very fast clicks + turns)
+            if pressed && !self.last_pressed {
+                if now.duration_since(self.last_event_time) < self.debounce {
+                    events.push(PowerMateEvent::Press);
+                    self.last_pressed = true;
+                }
+            }
+
+            if pressed {
+                events.push(PowerMateEvent::TurnWhilePressed(delta));
+            } else {
+                events.push(PowerMateEvent::Turn(delta));
+            }
+
+            self.last_event_time = now;
+        }
+
+        events
+    }
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init(); // Initialize the logger at the start
@@ -22,36 +88,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // Open device (replace with your VID/PID)
-    // let vid = 0x1234;
-    // let pid = 0x5678;
-
     let device = api.open(VID, PID)?;
+    device.set_blocking_mode(false);
 
-    // // Write (send output report)
-    // let data = [0x00, 0x01, 0x02, 0x03]; // first byte is report ID (often 0)
-    // device.write(&data)?;
+    let mut pmate = PowerMate::new();
 
-    // // Read (input report)
     loop{
         let mut buf = [0u8; 64];
-        let len = device.read(&mut buf)?;
-        log::debug!("Read {} bytes: {:?}", len, &buf[..len]);
-        dispatch_msg(buf);
-
+        match device.read(&mut buf) {
+            Ok(n) if n > 0 => {
+                log::debug!("Read {} bytes: {:?}", n, &buf[..n]);
+                if n >= 6 {
+                    let first_six = buf[..6].try_into()?;
+                    let events = pmate.handle_report(first_six);
+                    for event in events {
+                        dispatch_event(event);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     Ok(())
 }
 
-enum PowerMateEvent {
-    ClickIn,
-    ClickOut,
-    RotateRight,
-    RotateLeft,
-    ClickedRotateRight,
-    ClickedRotateLeft,
-    Invalid
-}
+// enum PowerMateEvent {
+//     ClickIn,
+//     ClickOut,
+//     RotateRight,
+//     RotateLeft,
+//     ClickedRotateRight,
+//     ClickedRotateLeft,
+//     Invalid
+// }
 
 fn with_endpoint_volume<F, T>(f: F) -> Result<T>
 where
@@ -115,42 +184,24 @@ fn toggle_mute() -> Result<()> {
     })
 }
 
-fn dispatch_msg(buf: [u8; 64]) -> Result<()> {
-    let event = match buf {
-        [0x01, 0x00, ..] => PowerMateEvent::ClickIn,
-        [0x00, 0x00, ..] => PowerMateEvent::ClickOut,
-        [0x00, 0x01, ..] => PowerMateEvent::RotateRight,
-        [0x00, 0xff, ..] => PowerMateEvent::RotateLeft,
-        [0x01, 0x01, ..] => PowerMateEvent::ClickedRotateRight,
-        [0x01, 0xff, ..] => PowerMateEvent::ClickedRotateLeft,
-        [a,b, ..] => PowerMateEvent::Invalid,
-        _ => PowerMateEvent::Invalid
-    };
-    match event {
-        PowerMateEvent::ClickIn => {
-            log::info!("ClickIn");
+fn dispatch_event(evt: PowerMateEvent) {
+    match evt {
+        PowerMateEvent::Press => {
+
         },
-        PowerMateEvent::ClickOut => {
-            log::info!("ClickOut");
+        PowerMateEvent::Release => {
             toggle_mute().expect("woo");
         },
-        PowerMateEvent::RotateRight => {
-            log::info!("RotateRight");
-            change_volume(0.025).expect("woo");
+        PowerMateEvent::Turn(val) => {
+            if val > 0 {
+                change_volume(0.025).expect("woo");
+            } else {
+                change_volume(-0.025).expect("woo");
+            }
         },
-        PowerMateEvent::RotateLeft => {
-            log::info!("RotateLeft");
-            change_volume(-0.025).expect("woo");
-        },
-        PowerMateEvent::ClickedRotateRight => {
-            println!("ClickedRotateRight");
-        },
-        PowerMateEvent::ClickedRotateLeft => {
-            println!("ClickedRotateLeft");
-        },
-        PowerMateEvent::Invalid => {
-            log::error!("Invalid Event!");
+        PowerMateEvent::TurnWhilePressed(_) => {
+
         }
     }
-    Ok(())
+
 }
