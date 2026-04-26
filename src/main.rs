@@ -1,8 +1,28 @@
-use log;
+#![windows_subsystem = "windows"]
+
+mod windows_debugger;
+
+use windows_debugger::LOGGER;
+use ctrlc;
+
+use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, thread};
+use log::{self, LevelFilter};
+use tray_icon::{
+    menu::{Menu, MenuEvent, MenuItem},
+    TrayIcon, TrayIconBuilder,
+    Icon
+};
+
+use winit::{
+    application::ApplicationHandler,
+    event_loop::{ActiveEventLoop, EventLoop},
+};
 use hidapi::HidApi;
-use anyhow::{anyhow, Result};
+use anyhow::{Result};
 use std::time::{Duration, Instant};
 use windows::{Win32::{Media::Audio::{Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender}, System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize}}, core::Interface};
+use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, PlatformConfig};
+
 
 
 // PowerMate VID and PID
@@ -74,9 +94,110 @@ impl PowerMate {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init(); // Initialize the logger at the start
-    let api = HidApi::new()?;
+fn load_icon() -> Icon {
+    let bytes = include_bytes!("icon.png");
+
+    // Load image from disk
+    let img = image::load_from_memory(bytes)
+        .expect("Failed to load icon")
+        .into_rgba8();
+
+
+    let (width, height) = img.dimensions();
+    let rgba = img.into_raw();
+
+    Icon::from_rgba(rgba, width, height).expect("Failed to create icon")
+}
+struct App {
+    tray_icon: Option<TrayIcon>,
+    quit_id: Option<tray_icon::menu::MenuId>,
+    // should_exit: Arc<AtomicBool>,
+
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
+        // Build menu
+        let quit = MenuItem::new("Quit", true, None);
+        self.quit_id = Some(quit.id().clone());
+
+        // let quit = MenuItem::new("Quit", true, None);
+        // self.quit_id = Some(quit.id().clone());
+
+        let menu = Menu::new();
+        menu.append(&quit).unwrap();
+        let icon = load_icon();
+
+        // Create tray icon
+
+        let tray_icon = TrayIconBuilder::new()
+            .with_tooltip("Powermate Control")
+            .with_icon(icon)
+            .with_menu(Box::new(menu))
+            .build()
+            .unwrap();
+
+        self.tray_icon = Some(tray_icon);
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+
+        // Handle menu events
+        let menu_channel = MenuEvent::receiver();
+
+        while let Ok(event) = menu_channel.try_recv() {
+            log::info!("about to wait");
+            if let Some(ref quit_id) = self.quit_id {
+                if event.id == *quit_id {
+                    log::info!("Quitting...");
+                    event_loop.exit();
+                }
+            }
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+    ) {
+        todo!()
+    }
+}
+
+fn setup_logging() {
+    log::set_logger(&LOGGER).unwrap();
+    log::set_max_level(LevelFilter::Debug);
+
+}
+
+fn main() {
+    setup_logging();
+    // log::info!("Main started");
+    let event_loop = EventLoop::new().unwrap();
+
+    // let should_exit = Arc::new(AtomicBool::new(false));
+    // let flag = should_exit.clone();
+
+    // ctrlc::set_handler(move || {
+    //     flag.store(true, Ordering::Relaxed);
+    // })
+    // .expect("Error setting Ctrl-C handler");
+    thread::spawn(volume_thread);
+
+    let mut app = App {
+        tray_icon: None,
+        quit_id: None,
+        // should_exit
+    };
+
+    event_loop.run_app(&mut app).unwrap();
+}
+
+fn volume_thread() {
+
+    let api = HidApi::new().expect("Failed to create HidApi");
 
     // List devices
     for device in api.device_list() {
@@ -88,7 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    let device = api.open(VID, PID)?;
+    let device = api.open(VID, PID).expect("Failed to open powermate");
     device.set_blocking_mode(false);
 
     let mut pmate = PowerMate::new();
@@ -99,7 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(n) if n > 0 => {
                 log::debug!("Read {} bytes: {:?}", n, &buf[..n]);
                 if n >= 6 {
-                    let first_six = buf[..6].try_into()?;
+                    let first_six = buf[..6].try_into().expect("failed to get first six bytes");
                     let events = pmate.handle_report(first_six);
                     for event in events {
                         dispatch_event(event);
@@ -109,24 +230,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         }
     }
-    Ok(())
 }
 
-// enum PowerMateEvent {
-//     ClickIn,
-//     ClickOut,
-//     RotateRight,
-//     RotateLeft,
-//     ClickedRotateRight,
-//     ClickedRotateLeft,
-//     Invalid
-// }
 
 fn with_endpoint_volume<F, T>(f: F) -> Result<T>
 where
     F: FnOnce(&IAudioEndpointVolume) -> Result<T>,
 {
-// fn windows_volume_junk() -> Result<()> {
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED);
 
