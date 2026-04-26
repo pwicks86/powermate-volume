@@ -20,7 +20,7 @@ use winit::{
 use hidapi::HidApi;
 use anyhow::{Result};
 use std::time::{Duration, Instant};
-use windows::{Win32::{Media::Audio::{Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender}, System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize}}, core::Interface};
+use windows::{Win32::{Media::Audio::{Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender}, System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize}, UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY}}, core::Interface};
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, PlatformConfig};
 
 
@@ -58,38 +58,27 @@ impl PowerMate {
         let pressed = buf[0] != 0;
         let delta = buf[1] as i8;
         let now = Instant::now();
+        log::debug!("Handling report, pressed = {}, delta = {}", pressed, delta);
 
-        // --- Handle button transitions (deduplicated) ---
-        if pressed != self.last_pressed {
-            if pressed {
-                events.push(PowerMateEvent::Press);
-            } else {
+        if delta == 0 {
+            log::debug!("Button Event");
+            if self.last_pressed {
                 events.push(PowerMateEvent::Release);
-            }
-            self.last_pressed = pressed;
-            self.last_event_time = now;
-        }
-
-        // --- Handle rotation ---
-        if delta != 0 {
-            // If we somehow missed a press but we're rotating while "pressed",
-            // optionally infer it (helps with very fast clicks + turns)
-            if pressed && !self.last_pressed {
-                if now.duration_since(self.last_event_time) < self.debounce {
-                    events.push(PowerMateEvent::Press);
-                    self.last_pressed = true;
-                }
+                self.last_pressed = false;
+            } else {
+                events.push(PowerMateEvent::Press);
+                self.last_pressed = true;
             }
 
-            if pressed {
+        } else {
+
+            if self.last_pressed {
                 events.push(PowerMateEvent::TurnWhilePressed(delta));
             } else {
                 events.push(PowerMateEvent::Turn(delta));
             }
 
-            self.last_event_time = now;
         }
-
         events
     }
 }
@@ -176,7 +165,6 @@ fn main() {
     setup_logging();
     // log::info!("Main started");
     let event_loop = EventLoop::new().unwrap();
-
     // let should_exit = Arc::new(AtomicBool::new(false));
     // let flag = should_exit.clone();
 
@@ -225,6 +213,8 @@ fn volume_thread() {
                     for event in events {
                         dispatch_event(event);
                     }
+                } else {
+                    log::warn!("Invalid number of bytes");
                 }
             }
             _ => {}
@@ -293,19 +283,61 @@ fn toggle_mute() -> Result<()> {
         Ok(())
     })
 }
+const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
+
+fn send_play_pause() {
+    unsafe {
+        // key down
+        let down = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(VK_MEDIA_PLAY_PAUSE),
+                    wScan: 0,
+                    dwFlags: Default::default(),
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+
+        // key up
+        let up = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(VK_MEDIA_PLAY_PAUSE),
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+
+        let inputs = [down, up];
+        log::info!("Sending play/pause");
+
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+}
 
 fn dispatch_event(evt: PowerMateEvent) {
     match evt {
         PowerMateEvent::Press => {
-
+            log::info!("Press");
         },
         PowerMateEvent::Release => {
-            toggle_mute().expect("woo");
+            // toggle_mute().expect("woo");
+            log::info!("Release");
+            send_play_pause();
         },
         PowerMateEvent::Turn(val) => {
             if val > 0 {
+                log::info!("CW");
                 change_volume(0.025).expect("woo");
             } else {
+                log::info!("CCW");
                 change_volume(-0.025).expect("woo");
             }
         },
