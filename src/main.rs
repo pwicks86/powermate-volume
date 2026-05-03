@@ -115,49 +115,78 @@ fn tokio_runtime(
 
 async fn hid_task(tx: Sender<AppEvent>) {
     tokio::task::spawn_blocking(move || {
-        let api = HidApi::new().expect("Failed to create HidApi");
+        let mut api = HidApi::new().expect("Failed to create HidApi");
 
-        // List devices
-        for device in api.device_list() {
-            log::info!(
-                "VID: {:04x}, PID: {:04x}, Path: {:?}",
-                device.vendor_id(),
-                device.product_id(),
-                device.path()
-            );
-        }
-
-        let device = api.open(VID, PID).expect("Failed to open powermate");
-        device.set_blocking_mode(false);
-        let mut last_pressed = false;
-
-        // let mut pmate = PowerMate::new();
         loop {
-            let mut buf = [0u8; 64];
-            match device.read(&mut buf) {
-                Ok(n) => {
-                    if n > 0 {
-                        let cmd_buf: [u8; 6] =
-                            buf[..6].try_into().expect("failed to get first six bytes");
+            log::info!("Waiting for PowerMate...");
+
+            // ---- WAIT FOR DEVICE ----
+            let device_info = loop {
+                api.refresh_devices().ok();
+
+                if let Some(dev) = api
+                    .device_list()
+                    .find(|d| d.vendor_id() == VID && d.product_id() == PID)
+                {
+                    break dev.clone();
+                }
+
+                std::thread::sleep(Duration::from_millis(500));
+            };
+
+            log::info!("PowerMate connected!");
+
+            // ---- OPEN DEVICE ----
+            let device = match device_info.open_device(&api) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::error!("Failed to open device: {:?}", e);
+                    continue;
+                }
+            };
+
+            device.set_blocking_mode(false);
+            let mut last_pressed = false;
+
+            // ---- READ LOOP ----
+            loop {
+                let mut buf = [0u8; 64];
+
+                match device.read(&mut buf) {
+                    Ok(n) if n > 0 => {
+                        let cmd_buf: [u8; 6] = match buf[..6].try_into() {
+                            Ok(b) => b,
+                            Err(_) => continue,
+                        };
+
                         let pressed = cmd_buf[0] != 0;
                         let delta = cmd_buf[1] as i8;
+
                         if delta == 0 {
-                            if !last_pressed {
+                            if pressed && !last_pressed {
                                 tx.blocking_send(AppEvent::Hid(HidEvent::Press)).ok();
-                                last_pressed = true;
-                            } else {
+                            } else if !pressed && last_pressed {
                                 tx.blocking_send(AppEvent::Hid(HidEvent::Release)).ok();
-                                last_pressed = false;
                             }
+                            last_pressed = pressed;
                         } else {
                             tx.blocking_send(AppEvent::Hid(HidEvent::Turn(delta))).ok();
                         }
-                    } else {
-                        // log::warn!("Invalid number of bytes: {}", n);
+                    }
+
+                    Ok(_) => {
+                        // no data
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+
+                    Err(e) => {
+                        log::warn!("Device disconnected or read error: {:?}", e);
+                        break; // 🔥 exit read loop → go back to wait
                     }
                 }
-                _ => {}
             }
+
+            log::info!("PowerMate disconnected");
         }
     })
     .await
