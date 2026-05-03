@@ -2,7 +2,8 @@
 
 mod windows_debugger;
 
-use ctrlc;
+use clap::Parser;
+
 use windows_debugger::LOGGER;
 
 use log::{self, LevelFilter};
@@ -73,15 +74,31 @@ enum CommandEvent {
     VolumeDown,
     Mute,
 }
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Enable verbose output
+    #[arg(short, long)]
+    verbose: bool,
+}
 
-fn setup_logging() {
+
+fn setup_logging(verbose: bool) {
     log::set_logger(&LOGGER).unwrap();
-    log::set_max_level(LevelFilter::Debug);
+    let level_str = if (verbose) {
+        log::set_max_level(LevelFilter::Debug);
+        "debug"
+    } else {
+        log::set_max_level(LevelFilter::Info);
+        "info"
+    };
+    log::info!("Log level set to {}", level_str);
 }
 
 // #[tokio::main]
 fn main() {
-    setup_logging();
+    let args = Args::parse();
+    setup_logging(args.verbose);
     log::info!("starting app");
 
     // start tokio in background thread
