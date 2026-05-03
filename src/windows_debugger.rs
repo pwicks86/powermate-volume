@@ -1,5 +1,5 @@
 use log::{Level, LevelFilter, Log, Metadata, Record};
-use windows::{Win32::System::Diagnostics::Debug::OutputDebugStringW};
+use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows::core::PCWSTR;
 
 pub struct DebugLogger;

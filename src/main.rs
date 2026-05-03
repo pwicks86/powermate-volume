@@ -2,28 +2,48 @@
 
 mod windows_debugger;
 
-use windows_debugger::LOGGER;
 use ctrlc;
+use windows_debugger::LOGGER;
 
-use tokio::time::{sleep};
-use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, thread};
 use log::{self, LevelFilter};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+};
+use tokio::time::sleep;
 use tray_icon::{
+    Icon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem},
-    TrayIconBuilder,
-    Icon
 };
 
+use anyhow::Result;
+use futures_lite::future;
+use hidapi::HidApi;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc::Sender;
+use windows::{
+    Win32::{
+        Media::Audio::{
+            Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole,
+            eRender,
+        },
+        System::Com::{
+            CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+        },
+        UI::Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
+            VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE,
+        },
+    },
+    core::Interface,
+};
 use winit::{
     application::ApplicationHandler,
     event_loop::{ActiveEventLoop, EventLoop},
 };
-use hidapi::HidApi;
-use anyhow::{Result};
-use std::time::{Duration, Instant};
-use windows::{Win32::{Media::Audio::{Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender}, System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize}, UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE}}, core::Interface};
-use tokio::sync::mpsc::{Sender};
-use futures_lite::future;
 
 use tokio::sync::mpsc;
 
@@ -54,11 +74,9 @@ enum CommandEvent {
     Mute,
 }
 
-
 fn setup_logging() {
     log::set_logger(&LOGGER).unwrap();
     log::set_max_level(LevelFilter::Debug);
-
 }
 
 // #[tokio::main]
@@ -93,12 +111,10 @@ fn tokio_runtime(
 
         future::pending::<()>().await;
     });
-
 }
 
 async fn hid_task(tx: Sender<AppEvent>) {
     tokio::task::spawn_blocking(move || {
-
         let api = HidApi::new().expect("Failed to create HidApi");
 
         // List devices
@@ -117,12 +133,12 @@ async fn hid_task(tx: Sender<AppEvent>) {
 
         // let mut pmate = PowerMate::new();
         loop {
-
             let mut buf = [0u8; 64];
             match device.read(&mut buf) {
                 Ok(n) => {
                     if n > 0 {
-                        let cmd_buf: [u8; 6] = buf[..6].try_into().expect("failed to get first six bytes");
+                        let cmd_buf: [u8; 6] =
+                            buf[..6].try_into().expect("failed to get first six bytes");
                         let pressed = cmd_buf[0] != 0;
                         let delta = cmd_buf[1] as i8;
                         if delta == 0 {
@@ -132,7 +148,6 @@ async fn hid_task(tx: Sender<AppEvent>) {
                             } else {
                                 tx.blocking_send(AppEvent::Hid(HidEvent::Release)).ok();
                                 last_pressed = false;
-
                             }
                         } else {
                             tx.blocking_send(AppEvent::Hid(HidEvent::Turn(delta))).ok();
@@ -144,14 +159,12 @@ async fn hid_task(tx: Sender<AppEvent>) {
                 _ => {}
             }
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
-
-async fn fsm_task(
-    mut rx: mpsc::Receiver<AppEvent>,
-    tx_cmd: mpsc::Sender<CommandEvent>,
-) {
+async fn fsm_task(mut rx: mpsc::Receiver<AppEvent>, tx_cmd: mpsc::Sender<CommandEvent>) {
     let click_window = Duration::from_millis(350);
     let long_press_threshold = Duration::from_millis(600);
 
@@ -227,30 +240,26 @@ async fn media_task(mut rx: Receiver<CommandEvent>) {
             CommandEvent::PlayPause => {
                 log::info!("PlayPause");
                 send_play_pause();
-            },
+            }
             CommandEvent::Mute => {
                 log::info!("Mute");
                 toggle_mute();
-            },
+            }
             CommandEvent::Next => {
                 log::info!("Next");
                 send_next_track();
-            },
-            _ => {
-
             }
-            // CommandEvent::PlayPause => send_play_pause(),
-            // CommandEvent::Next => send_next(),
-            // CommandEvent::Prev => send_prev(),
-            // CommandEvent::VolumeUp => volume_up(),
-            // CommandEvent::VolumeDown => volume_down(),
-            // CommandEvent::Mute => toggle_mute(),
+            _ => {} // CommandEvent::PlayPause => send_play_pause(),
+                    // CommandEvent::Next => send_next(),
+                    // CommandEvent::Prev => send_prev(),
+                    // CommandEvent::VolumeUp => volume_up(),
+                    // CommandEvent::VolumeDown => volume_down(),
+                    // CommandEvent::Mute => toggle_mute(),
         }
     }
 }
 
 struct TrayApp {
-    // tx_cmd: tokio::sync::mpsc::Sender<CommandEvent>,
     tray: Option<tray_icon::TrayIcon>,
     quit_id: Option<tray_icon::menu::MenuId>,
 }
@@ -262,7 +271,6 @@ fn load_icon() -> Icon {
     let img = image::load_from_memory(bytes)
         .expect("Failed to load icon")
         .into_rgba8();
-
 
     let (width, height) = img.dimensions();
     let rgba = img.into_raw();
@@ -303,7 +311,7 @@ impl ApplicationHandler for TrayApp {
             }
         }
     }
-    
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -325,7 +333,6 @@ async fn tray_task(tx_cmd: Sender<CommandEvent>) {
 
     event_loop.run_app(&mut app).unwrap();
 }
-
 
 fn tray_main_thread() {
     log::info!("tray_main_thread");
@@ -355,16 +362,11 @@ where
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
 
         // Get default playback device
-        let device = device_enumerator.GetDefaultAudioEndpoint(
-            eRender,
-            eConsole,
-        )?;
+        let device = device_enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
 
         // Activate endpoint volume interface
-        let volume: IAudioEndpointVolume = device.Activate::<IAudioEndpointVolume>(
-                CLSCTX_ALL,
-                None,
-            )?
+        let volume: IAudioEndpointVolume = device
+            .Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)?
             .cast()?;
 
         let result = f(&volume);
@@ -399,12 +401,11 @@ fn toggle_mute() -> Result<()> {
             log::info!("mute_status = {}", mute_status.as_ref().unwrap().as_bool());
             match mute_status {
                 Ok(muted) => {
-
-                    ep.SetMute(!muted.as_bool(),  std::ptr::null());
+                    ep.SetMute(!muted.as_bool(), std::ptr::null());
                 }
                 Err(e) => {
                     log::error!("Error changing volume");
-                },
+                }
             }
         }
         Ok(())
@@ -412,8 +413,7 @@ fn toggle_mute() -> Result<()> {
 }
 // const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
 
-
-fn send_key(key_code: VIRTUAL_KEY ) {
+fn send_key(key_code: VIRTUAL_KEY) {
     unsafe {
         // key down
         let down = INPUT {
@@ -457,4 +457,3 @@ fn send_play_pause() {
 fn send_next_track() {
     send_key(VK_MEDIA_NEXT_TRACK);
 }
-
