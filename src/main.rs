@@ -10,7 +10,7 @@ use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, thread};
 use log::{self, LevelFilter};
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
-    TrayIcon, TrayIconBuilder,
+    TrayIconBuilder,
     Icon
 };
 
@@ -21,9 +21,7 @@ use winit::{
 use hidapi::HidApi;
 use anyhow::{Result};
 use std::time::{Duration, Instant};
-use windows::{Win32::{Media::Audio::{Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender}, System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize}, UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY}}, core::Interface};
-use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, PlatformConfig};
-// use std::sync::mpsc::{Sender};
+use windows::{Win32::{Media::Audio::{Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender}, System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize}, UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE}}, core::Interface};
 use tokio::sync::mpsc::{Sender};
 use futures_lite::future;
 
@@ -154,50 +152,66 @@ async fn fsm_task(
     mut rx: mpsc::Receiver<AppEvent>,
     tx_cmd: mpsc::Sender<CommandEvent>,
 ) {
+    let click_window = Duration::from_millis(350);
+    let long_press_threshold = Duration::from_millis(600);
+
     let mut click_count = 0;
-    let mut last_click = Instant::now();
-    let window = Duration::from_millis(350);
+    let mut last_release = Instant::now();
+    let mut press_start: Option<Instant> = None;
 
     loop {
-        if let Some(AppEvent::Hid(event)) = rx.recv().await {
-            match event {
-                HidEvent::Turn(d) => {
-                    if d > 0 {
-                        let _ = tx_cmd.send(CommandEvent::VolumeUp).await;
-                    } else {
-                        let _ = tx_cmd.send(CommandEvent::VolumeDown).await;
-                    }
-                }
-
-                HidEvent::Press => {}
-
-                HidEvent::Release => {
-                    let now = Instant::now();
-
-                    if now.duration_since(last_click) <= window {
-                        click_count += 1;
-                    } else {
-                        click_count = 1;
+        tokio::select! {
+            Some(AppEvent::Hid(event)) = rx.recv() => {
+                match event {
+                    HidEvent::Press => {
+                        press_start = Some(Instant::now());
                     }
 
-                    last_click = now;
+                    HidEvent::Release => {
+                        let now = Instant::now();
 
-                    let tx = tx_cmd.clone();
-                    let count = click_count;
+                        // ---- LONG PRESS CHECK ----
+                        if let Some(start) = press_start.take() {
+                            if now.duration_since(start) >= long_press_threshold {
+                                click_count = 0; // cancel click sequence
+                                let _ = tx_cmd.send(CommandEvent::Mute).await; // long press action
+                                continue;
+                            }
+                        }
 
-                    tokio::spawn(async move {
-                        sleep(window).await;
+                        // ---- MULTI CLICK LOGIC ----
+                        if now.duration_since(last_release) <= click_window {
+                            click_count += 1;
+                        } else {
+                            click_count = 1;
+                        }
 
-                        let cmd = match count {
-                            1 => CommandEvent::PlayPause,
-                            2 => CommandEvent::Mute,
-                            3 => CommandEvent::Next,
-                            _ => CommandEvent::PlayPause,
+                        last_release = now;
+                    }
+
+                    HidEvent::Turn(d) => {
+                        let cmd = if d > 0 {
+                            CommandEvent::VolumeUp
+                        } else {
+                            CommandEvent::VolumeDown
                         };
-
-                        let _ = tx.send(cmd).await;
-                    });
+                        let _ = tx_cmd.send(cmd).await;
+                    }
                 }
+            }
+
+            // ---- CLICK RESOLUTION TIMER ----
+            _ = sleep(click_window), if click_count > 0 => {
+                let cmd = match click_count {
+                    1 => CommandEvent::PlayPause,
+                    2 => CommandEvent::Next,
+                    3 => CommandEvent::Prev,
+                    _ => CommandEvent::PlayPause,
+                };
+
+                let _ = tx_cmd.send(cmd).await;
+
+                click_count = 0;
             }
         }
     }
@@ -210,6 +224,18 @@ async fn media_task(mut rx: Receiver<CommandEvent>) {
         match cmd {
             CommandEvent::VolumeUp => volume_up(),
             CommandEvent::VolumeDown => volume_down(),
+            CommandEvent::PlayPause => {
+                log::info!("PlayPause");
+                send_play_pause();
+            },
+            CommandEvent::Mute => {
+                log::info!("Mute");
+                toggle_mute();
+            },
+            CommandEvent::Next => {
+                log::info!("Next");
+                send_next_track();
+            },
             _ => {
 
             }
@@ -384,16 +410,17 @@ fn toggle_mute() -> Result<()> {
         Ok(())
     })
 }
-const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
+// const VK_MEDIA_PLAY_PAUSE: u16 = 0xB3;
 
-fn send_play_pause() {
+
+fn send_key(key_code: VIRTUAL_KEY ) {
     unsafe {
         // key down
         let down = INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(VK_MEDIA_PLAY_PAUSE),
+                    wVk: key_code,
                     wScan: 0,
                     dwFlags: Default::default(),
                     time: 0,
@@ -407,7 +434,7 @@ fn send_play_pause() {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(VK_MEDIA_PLAY_PAUSE),
+                    wVk: key_code,
                     wScan: 0,
                     dwFlags: KEYEVENTF_KEYUP,
                     time: 0,
@@ -421,5 +448,13 @@ fn send_play_pause() {
 
         SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
     }
+}
+
+fn send_play_pause() {
+    send_key(VK_MEDIA_PLAY_PAUSE);
+}
+
+fn send_next_track() {
+    send_key(VK_MEDIA_NEXT_TRACK);
 }
 
