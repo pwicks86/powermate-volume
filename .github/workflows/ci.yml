@@ -29,6 +29,20 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # The tag names the release, but Cargo.toml is what stamps the binaries
+      # (build.rs -> exe version resource -> installer). If they disagree you
+      # get a "v0.2.0" release full of 0.1.0 binaries and no error, so fail
+      # here rather than after a six-minute build.
+      - name: Verify tag matches Cargo.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          $tag = "$env:GITHUB_REF_NAME" -replace '^v', ''
+          $manifest = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          Write-Host "tag=$tag  Cargo.toml=$manifest"
+          if ($tag -ne $manifest) {
+            throw "Tag v$tag does not match Cargo.toml version $manifest -- bump Cargo.toml and retag."
+          }
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
