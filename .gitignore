@@ -1,1 +1,6 @@
 /target
+/installer/output
+# Release staging dir used by the CI workflow
+/dist
+# Personal scratch notes
+/TODO.txt

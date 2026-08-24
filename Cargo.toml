@@ -2,9 +2,11 @@
 name = "powermate-volume"
 version = "0.1.0"
 edition = "2024"
+description = "Use a Griffin PowerMate as a volume knob and media controller on modern Windows"
+license = "MIT"
+repository = "https://github.com/pwicks86/powermate-volume"
 
 [dependencies]
-nusb = { version = "0.2.3", features=["smol"]}
 futures-lite = "2.6.1"
 anyhow = "1.0.102"
 hidapi = "2.6.5"
@@ -21,13 +23,16 @@ windows = { version = "0.62.2", features = [
 
 ] }
 log = "0.4.29"
-env_logger = "0.11.10"
 tray-icon = "0.22.1"
 winit = "0.30.13"
-image = "0.25.10"
-ctrlc = "3.5.2"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 tokio = {
    version= "1.52.1",
    features = ["rt-multi-thread", "macros", "time", "sync"] 
 }
 clap = { version = "4.6.1", features = ["derive"] }
+winreg = "0.56.0"
+
+[build-dependencies]
+image = { version = "0.25.10", default-features = false, features = ["png", "ico"] }
+winresource = "0.1.31"
